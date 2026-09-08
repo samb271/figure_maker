@@ -1,0 +1,10 @@
+outputs/
+
+# data CSVs are local; only the *_template.csv files are tracked
+*.csv
+!*_template.csv
+
+.venv/
+__pycache__/
+*.pyc
+.DS_Store

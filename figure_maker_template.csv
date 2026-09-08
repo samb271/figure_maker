@@ -1,0 +1,13 @@
+# Env A
+method,10,20,50,100
+Baseline,0.30,0.45,0.60,0.68
+Method X,0.35,0.55,0.75±0.03,0.88±0.02
+~Method X (variant) = Method X,0.40,0.60,0.80,0.90
+Oracle,0.95
+
+# Env B
+method,1,2,4,8
+Baseline,0.25,0.38,0.50,0.60
+Method X,0.30,0.50,0.70,0.85
+~Method X (variant) = Method X,0.32,0.52,0.72,0.87
+Oracle,0.95
