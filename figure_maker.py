@@ -162,7 +162,7 @@ def resolve_output(output, csv_path):
     return out
 
 
-def _overlap_offsets(entries, x_pos, frac=0.006, fallback=0.008):
+def _overlap_offsets(entries, x_pos, frac=0.01, fallback=0.01):
     """Small per-entry y-offset (visual only) so series with identical values
     don't fully overlap. Entries are grouped by their (expanded) y values;
     each group of size > 1 is spread symmetrically around its true value by
