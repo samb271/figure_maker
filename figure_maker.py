@@ -208,14 +208,20 @@ def build_figure(panels, title, xlabel, ylabel, fit_y=False,
             means, errs = entry["means"], entry["errs"]
             color = color_for(entry)
 
+            # Dashed lines draw above solid ones (regardless of CSV row order) so
+            # that an exact overlap shows as an alternating pattern instead of
+            # the solid line's unbroken fill fully hiding the dashed one.
+            zorder = 3 if entry["dashed"] else 2
+
             if entry["constant"]:
-                h = ax.axhline(means[0], linestyle="--", color=color)
+                h = ax.axhline(means[0], linestyle="--", color=color, zorder=zorder)
                 if errs[0]:
                     ax.axhspan(means[0] - errs[0], means[0] + errs[0],
                                color=color, alpha=band_alpha, linewidth=0)
             else:
                 h, = ax.plot(panel["x_pos"], means, color=color, marker="o",
-                             linestyle="--" if entry["dashed"] else "-")
+                             linestyle="--" if entry["dashed"] else "-",
+                             zorder=zorder)
                 if any(errs):
                     lo = [m - e for m, e in zip(means, errs)]
                     hi = [m + e for m, e in zip(means, errs)]
