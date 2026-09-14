@@ -162,6 +162,37 @@ def resolve_output(output, csv_path):
     return out
 
 
+def _overlap_offsets(entries, x_pos, frac=0.006, fallback=0.008):
+    """Small per-entry y-offset (visual only) so series with identical values
+    don't fully overlap. Entries are grouped by their (expanded) y values;
+    each group of size > 1 is spread symmetrically around its true value by
+    multiples of `frac` * panel range (or `fallback` if the panel has no
+    range, e.g. everything is the same constant)."""
+    n_x = len(x_pos)
+
+    def expanded(entry):
+        means = entry["means"]
+        if entry["constant"]:
+            means = means * n_x
+        return tuple(round(m, 9) for m in means)
+
+    groups = {}
+    for entry in entries:
+        groups.setdefault(expanded(entry), []).append(entry)
+
+    vals = [m + e for entry in entries for m, e in zip(entry["means"], entry["errs"])]
+    vals += [m - e for entry in entries for m, e in zip(entry["means"], entry["errs"])]
+    span = (max(vals) - min(vals)) if vals else 0
+    delta = span * frac if span > 1e-9 else fallback
+
+    offsets = {}
+    for group in groups.values():
+        n = len(group)
+        for i, entry in enumerate(group):
+            offsets[id(entry)] = (i - (n - 1) / 2) * delta if n > 1 else 0.0
+    return offsets
+
+
 def _pad_range(entries, frac=0.08):
     """(ymin, ymax) covering every value/band in a panel, with a margin."""
     vals = []
@@ -204,8 +235,11 @@ def build_figure(panels, title, xlabel, ylabel, fit_y=False,
         return color_of[name]
 
     for ax, panel in zip(axes, panels):
+        offsets = _overlap_offsets(panel["entries"], panel["x_pos"])
         for entry in panel["entries"]:
-            means, errs = entry["means"], entry["errs"]
+            offset = offsets[id(entry)]
+            means = [m + offset for m in entry["means"]]
+            errs = entry["errs"]
             color = color_for(entry)
 
             # Dashed lines draw above solid ones (regardless of CSV row order) so
