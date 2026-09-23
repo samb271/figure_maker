@@ -28,12 +28,12 @@ python -m venv .venv
   --ytitle "Success rate"
 ```
 
-Each run writes `outputs/<csv name>.pdf`. Use `-o name.png` for another
+Each run writes `outputs/<csv name>.pdf`, always at the same size (4.6 in wide per panel + 0.4, `--height` tall), whatever the legend length. Use `-o name.png` for another
 format/name (relative paths still land in `outputs/`), or `--show` for an
 interactive window.
 
-Common options: `--title` (figure suptitle), `--ytitle`, `--dpi`.
-`figure_maker.py` also has `--xtitle`, `--fit-y`, `--xlog`, `--ylog`.
+Common options: `--title` (figure suptitle), `--ytitle`, `--height` (inches, default 4.3), `--fit-y`, `--dpi`.
+`figure_maker.py` also has `--xtitle`, `--xlog` (all panels) or `--xlog-panel N` (repeatable, 1 = leftmost), `--ylog`.
 
 ## CSV format
 
@@ -60,6 +60,8 @@ Oracle,0.95                  <- single value -> dashed horizontal constant
 - Header x values that all parse as numbers give a numeric axis; otherwise
   they become evenly spaced categorical ticks.
 - Panels share one y-range by default; `--fit-y` scales each to its own data.
+- `--xtitle` may be repeated once per panel (left to right) to give each panel
+  its own x title; a single `--xtitle` applies to all panels.
 - Titles may contain matplotlib mathtext, e.g. `--xtitle 'Temperature $\tau$'`.
 
 ### `bar_maker.py`
@@ -77,7 +79,7 @@ Oracle, 0.95
 - **`~label`** → hatched bar.
 - **`label = other`** → same colour as bar `other`.
 - A label reused across panels keeps one colour and one legend entry.
-- All panels share the same y scale.
+- All panels share the same y scale by default; `--fit-y` scales each to its own bars.
 
 See [`figure_maker_template.csv`](figure_maker_template.csv) and
 [`bar_maker_template.csv`](bar_maker_template.csv) for runnable examples.

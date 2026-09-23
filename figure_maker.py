@@ -29,8 +29,18 @@ Rules
   they become evenly spaced categorical ticks.
 - A series name that appears in several panels keeps one colour and one
   shared legend entry.
+- Prefix a series name with '!' to mark it as background context rather than
+  an evaluated method (e.g. "!Coverage,0.9,0.7,0.5"): it is drawn as a
+  shaded grey area with a dotted outline, behind everything else, with a
+  patch-style legend swatch instead of a line+marker - so it can't be
+  mistaken for a baseline or an evaluated method. Leave its y values blank
+  to skip it for a panel where it hasn't been computed yet.
 - All panels share one y-range by default; pass --fit-y to scale each panel
-  to its own min/max instead. --xlog / --ylog switch an axis to log scale.
+  to its own min/max instead. --xlog / --ylog switch an axis to log scale (--xlog-panel N limits the
+  x log scale to panel N).
+  With a shared y-range, only the first panel shows tick labels by default;
+  pass --all-yticks to repeat them on every panel (the y title still appears
+  only once).
 
 For side-by-side bar charts, use bar_maker.py instead.
 
@@ -44,12 +54,17 @@ import csv
 import os
 import sys
 
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
 _ERR_SEPARATORS = ("±", "+/-", "+-")
 
 _OUTPUT_DIR = "outputs"
+
+_MIN_LEGEND_FONT = 9  # smallest legend text used to keep it on one row
+
+_CONTEXT_COLOR = "0.55"  # fixed neutral grey for '!'-prefixed context series
 
 _FONT_SIZES = {
     "font.size": 14,
@@ -116,6 +131,9 @@ def _parse_block(block_lines):
     entries = []
     for row in rows[1:]:
         name = row[0].strip()
+        context = name.startswith("!")
+        if context:
+            name = name[1:].strip()
         dashed = name.startswith("~")
         if dashed:
             name = name[1:].strip()
@@ -130,6 +148,9 @@ def _parse_block(block_lines):
         means = [m for m, _ in parsed]
         errs = [e for _, e in parsed]
 
+        if context and not means:
+            continue  # not computed yet for this panel
+
         if len(means) == 1:
             constant = True
         elif len(means) == len(x_pos):
@@ -141,7 +162,7 @@ def _parse_block(block_lines):
             )
         entries.append({"name": name, "means": means, "errs": errs,
                         "constant": constant, "dashed": dashed,
-                        "color_ref": color_ref})
+                        "color_ref": color_ref, "context": context})
 
     return {"title": title, "x_pos": x_pos, "x_labels": x_labels, "entries": entries}
 
@@ -162,12 +183,15 @@ def resolve_output(output, csv_path):
     return out
 
 
-def _overlap_offsets(entries, x_pos, frac=0.01, fallback=0.01):
+def _overlap_offsets(entries, x_pos, frac=0.015):
     """Small per-entry y-offset (visual only) so series with identical values
-    don't fully overlap. Entries are grouped by their (expanded) y values;
-    each group of size > 1 is spread symmetrically around its true value by
-    multiples of `frac` * panel range (or `fallback` if the panel has no
-    range, e.g. everything is the same constant)."""
+    don't fully overlap. Entries are grouped by their (expanded) y values.
+
+    A group whose shared value is flat (a horizontal line) is left at offset
+    0 here and returned separately in `flat_groups` - those get spread by
+    exactly one line-width later, once the axes' pixel scale is known. A
+    group that varies with x is spread immediately, symmetrically around its
+    true value, by multiples of `frac` * panel range."""
     n_x = len(x_pos)
 
     def expanded(entry):
@@ -183,14 +207,29 @@ def _overlap_offsets(entries, x_pos, frac=0.01, fallback=0.01):
     vals = [m + e for entry in entries for m, e in zip(entry["means"], entry["errs"])]
     vals += [m - e for entry in entries for m, e in zip(entry["means"], entry["errs"])]
     span = (max(vals) - min(vals)) if vals else 0
-    delta = span * frac if span > 1e-9 else fallback
+    delta = span * frac
 
     offsets = {}
-    for group in groups.values():
-        n = len(group)
-        for i, entry in enumerate(group):
-            offsets[id(entry)] = (i - (n - 1) / 2) * delta if n > 1 else 0.0
-    return offsets
+    flat_groups = []
+    for key, group in groups.items():
+        if len(group) < 2:
+            offsets[id(group[0])] = 0.0
+        elif len(set(key)) == 1:
+            flat_groups.append(group)
+            for entry in group:
+                offsets[id(entry)] = 0.0
+        else:
+            n = len(group)
+            for i, entry in enumerate(group):
+                offsets[id(entry)] = (i - (n - 1) / 2) * delta
+    return offsets, flat_groups
+
+
+def _linewidth_to_data(ax, handle):
+    """Convert a line's rendered width (points) to a y-axis data delta."""
+    lw_px = handle.get_linewidth() * ax.figure.dpi / 72.0
+    inv = ax.transData.inverted()
+    return abs(inv.transform((0, lw_px))[1] - inv.transform((0, 0))[1])
 
 
 def _pad_range(entries, frac=0.08):
@@ -205,11 +244,12 @@ def _pad_range(entries, frac=0.08):
     return lo - pad, hi + pad
 
 
-def build_figure(panels, title, xlabel, ylabel, fit_y=False,
-                 xlog=False, ylog=False, band_alpha=0.15):
+def build_figure(panels, title, xlabels, ylabel, fit_y=False,
+                 xlog_panels=(), ylog=False, band_alpha=0.15, all_yticks=False,
+                 height=4.3):
     plt.rcParams.update(_FONT_SIZES)
     n = len(panels)
-    fig, axes = plt.subplots(1, n, figsize=(4.6 * n + 0.4, 4.3),
+    fig, axes = plt.subplots(1, n, figsize=(4.6 * n + 0.4, height),
                              sharey=not fit_y, squeeze=False)
     axes = axes[0]
 
@@ -219,8 +259,11 @@ def build_figure(panels, title, xlabel, ylabel, fit_y=False,
     handles = {}
 
     def color_for(entry):
-        """Colour for a series: reuse '= other' target, else next palette slot."""
+        """Colour for a series: reuse '= other' target, else next palette slot.
+        Context series always get the same fixed grey, outside the palette."""
         nonlocal n_used
+        if entry["context"]:
+            return _CONTEXT_COLOR
         name, ref = entry["name"], entry["color_ref"]
         if name in color_of:
             return color_of[name]
@@ -234,13 +277,30 @@ def build_figure(panels, title, xlabel, ylabel, fit_y=False,
             n_used += 1
         return color_of[name]
 
-    for ax, panel in zip(axes, panels):
-        offsets = _overlap_offsets(panel["entries"], panel["x_pos"])
+    flat_dup_pending = []  # (ax, handle, index_in_group, group_size)
+
+    for i, (ax, panel) in enumerate(zip(axes, panels)):
+        plotted_entries = [e for e in panel["entries"] if not e["context"]]
+        offsets, flat_groups = _overlap_offsets(plotted_entries, panel["x_pos"])
+        entry_handle = {}
         for entry in panel["entries"]:
+            color = color_for(entry)
+
+            if entry["context"]:
+                means = (entry["means"] * len(panel["x_pos"])
+                         if entry["constant"] else entry["means"])
+                ax.fill_between(panel["x_pos"], 0, means, color=color,
+                                alpha=0.15, linewidth=0, zorder=1)
+                ax.plot(panel["x_pos"], means, color=color, linestyle=":",
+                       linewidth=1.5, zorder=1)
+                handles.setdefault(entry["name"], mpatches.Patch(
+                    facecolor=color, alpha=0.3, edgecolor=color,
+                    linestyle=":", label=entry["name"]))
+                continue
+
             offset = offsets[id(entry)]
             means = [m + offset for m in entry["means"]]
             errs = entry["errs"]
-            color = color_for(entry)
 
             # Dashed lines draw above solid ones (regardless of CSV row order) so
             # that an exact overlap shows as an alternating pattern instead of
@@ -263,6 +323,12 @@ def build_figure(panels, title, xlabel, ylabel, fit_y=False,
                                     color=color, alpha=band_alpha, linewidth=0)
 
             handles.setdefault(entry["name"], h)
+            entry_handle[id(entry)] = h
+
+        for group in flat_groups:
+            n_g = len(group)
+            for i, entry in enumerate(group):
+                flat_dup_pending.append((ax, entry_handle[id(entry)], i, n_g))
 
         ax.grid(True, linestyle="-", linewidth=0.5, alpha=0.3)
         ax.set_axisbelow(True)
@@ -275,32 +341,73 @@ def build_figure(panels, title, xlabel, ylabel, fit_y=False,
         if panel["x_labels"] is not None:
             ax.set_xticks(panel["x_pos"])
             ax.set_xticklabels(panel["x_labels"])
-        elif xlog:
+        elif i in xlog_panels:
             ax.set_xscale("log")
             ax.set_xticks(panel["x_pos"])
             ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
             ax.xaxis.set_minor_formatter(mticker.NullFormatter())
         if panel["title"]:
             ax.set_title(panel["title"])
-        if xlabel:
-            ax.set_xlabel(xlabel)
+        if xlabels:
+            ax.set_xlabel(xlabels[i] if len(xlabels) > 1 else xlabels[0])
         if ylabel and fit_y:
             ax.set_ylabel(ylabel)
+
+    if all_yticks and not fit_y:
+        for ax in axes[1:]:
+            ax.tick_params(labelleft=True)
 
     if ylabel and not fit_y:
         axes[0].set_ylabel(ylabel)
     if title:
         fig.suptitle(title)
 
-    ncol = min(len(handles), 5)
-    legend_rows = 1 + (len(handles) - 1) // ncol
-    bottom = 0.04 + 0.05 * legend_rows
+    # The legend is anchored at the figure's bottom edge, and its column count
+    # is lowered until it fits the figure width. The saved size is then always
+    # exactly the figsize (no bbox_inches="tight"), so a PDF's width doesn't
+    # depend on how long the legend is and every figure scales the same way
+    # when included in a paper.
+    renderer = fig.canvas.get_renderer()
+
+    def make_legend(ncol, fontsize):
+        legend = fig.legend(handles.values(), handles.keys(),
+                            loc="lower center", bbox_to_anchor=(0.5, 0.0),
+                            ncol=ncol, borderaxespad=0.2, fontsize=fontsize,
+                            columnspacing=1.2, handletextpad=0.5,
+                            frameon=True, framealpha=0.9, edgecolor="0.8",
+                            fancybox=False)
+        bbox = legend.get_window_extent(renderer).transformed(
+            fig.transFigure.inverted())
+        return legend, bbox
+
+    # Prefer a single row: shrink the legend text (down to a floor) before
+    # resorting to wrapping it onto several rows.
+    full = _FONT_SIZES["legend.fontsize"]
+    for fontsize in range(full, _MIN_LEGEND_FONT - 1, -1):
+        legend, bbox = make_legend(len(handles), fontsize)
+        if bbox.width <= 0.98:
+            break
+        legend.remove()
+    else:
+        ncol = min(len(handles), 5)
+        while True:
+            legend, bbox = make_legend(ncol, full)
+            if ncol == 1 or bbox.width <= 0.98:
+                break
+            legend.remove()
+            ncol -= 1
+    bottom = bbox.y1 + 0.02
 
     fig.tight_layout(rect=(0, bottom, 1, 0.97 if title else 1.0))
-    fig.legend(handles.values(), handles.keys(),
-               loc="upper center", bbox_to_anchor=(0.5, bottom),
-               ncol=ncol,
-               frameon=True, framealpha=0.9, edgecolor="0.8", fancybox=False)
+
+    if flat_dup_pending:
+        # transData is only final once the layout above has settled.
+        fig.canvas.draw()
+        for ax, handle, i, n_g in flat_dup_pending:
+            lw_data = _linewidth_to_data(ax, handle) * 1.5
+            offset = (i - (n_g - 1) / 2) * lw_data
+            handle.set_ydata([y + offset for y in handle.get_ydata()])
+
     return fig
 
 
@@ -316,15 +423,30 @@ def main(argv=None):
     p.add_argument("--show", action="store_true",
                    help="open an interactive window instead of saving a file")
     p.add_argument("--title", default="", help="overall figure title")
-    p.add_argument("--xtitle", default="", help="x-axis title (all panels)")
+    p.add_argument("--xtitle", action="append", default=[],
+                   help="x-axis title. Give it once to use it on every panel, "
+                        "or repeat it once per panel (left to right) for "
+                        "different titles, e.g. --xtitle 'Number of subgoals' "
+                        "--xtitle 'Soft-min temperature $\\tau$'")
     p.add_argument("--ytitle", default="", help="y-axis title")
     p.add_argument("--fit-y", dest="fit_y", action="store_true",
                    help="scale each panel's y-axis to its own min/max (default: "
                         "all panels share one y-range)")
+    p.add_argument("--all-yticks", dest="all_yticks", action="store_true",
+                   help="show y-axis tick labels on every panel instead of just "
+                        "the first (only applies when panels share one y-range, "
+                        "i.e. without --fit-y); the y title is still shown once")
     p.add_argument("--xlog", action="store_true",
                    help="use a logarithmic x axis (numeric x values only)")
+    p.add_argument("--xlog-panel", dest="xlog_panel", type=int, action="append",
+                   default=[], metavar="N",
+                   help="log x axis on panel N only (1 = leftmost); repeat for "
+                        "several panels")
     p.add_argument("--ylog", action="store_true",
                    help="use a logarithmic y axis")
+    p.add_argument("--height", type=float, default=4.3,
+                   help="figure height in inches (default 4.3); lower it to "
+                        "squish the plots vertically")
     p.add_argument("--dpi", type=int, default=150, help="output DPI (default 150)")
     args = p.parse_args(argv)
 
@@ -333,17 +455,27 @@ def main(argv=None):
     except (OSError, ValueError) as e:
         p.error(str(e))
 
-    if args.xlog and any(p["x_labels"] is not None for p in panels):
-        p.error("--xlog needs numeric x values; some panels have categorical labels")
+    if any(not 1 <= n <= len(panels) for n in args.xlog_panel):
+        p.error(f"--xlog-panel must be between 1 and {len(panels)}")
+    xlog_panels = (set(range(len(panels))) if args.xlog
+                   else {n - 1 for n in args.xlog_panel})
+    if any(panels[i]["x_labels"] is not None for i in xlog_panels):
+        p.error("log x axis needs numeric x values; a selected panel has "
+                "categorical labels")
+
+    if len(args.xtitle) > 1 and len(args.xtitle) != len(panels):
+        p.error(f"got {len(args.xtitle)} --xtitle values for {len(panels)} panels; "
+                "give one (used for all panels) or one per panel")
 
     fig = build_figure(panels, args.title, args.xtitle, args.ytitle,
-                       fit_y=args.fit_y, xlog=args.xlog, ylog=args.ylog)
+                       fit_y=args.fit_y, xlog_panels=xlog_panels, ylog=args.ylog,
+                       all_yticks=args.all_yticks, height=args.height)
 
     if args.show and not args.output:
         plt.show()
     else:
         out = resolve_output(args.output, args.csv)
-        fig.savefig(out, dpi=args.dpi, bbox_inches="tight", pad_inches=0.03)
+        fig.savefig(out, dpi=args.dpi)
         print(f"wrote {out}")
 
 

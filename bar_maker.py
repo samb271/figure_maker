@@ -5,7 +5,7 @@ CSV format
 ----------
 The file is split into one or more *env blocks* separated by blank lines.
 Each block becomes its own bar-chart panel, left to right, and every panel
-shares the same y scale.
+shares the same y scale (pass --fit-y to scale each panel to its own bars).
 
 A block looks like::
 
@@ -40,6 +40,8 @@ import numpy as np
 _ERR_SEPARATORS = ("±", "+/-", "+-")
 
 _OUTPUT_DIR = "outputs"
+
+_MIN_LEGEND_FONT = 9  # smallest legend text used to keep it on one row
 
 _FONT_SIZES = {
     "font.size": 14,
@@ -128,11 +130,11 @@ def resolve_output(output, csv_path):
     return out
 
 
-def build_figure(panels, title, ylabel):
+def build_figure(panels, title, ylabel, height=4.3, fit_y=False):
     plt.rcParams.update(_FONT_SIZES)
     n = len(panels)
-    fig, axes = plt.subplots(1, n, figsize=(3.4 * n + 0.4, 4.3),
-                             sharey=True, squeeze=False)
+    fig, axes = plt.subplots(1, n, figsize=(3.4 * n + 0.4, height),
+                             sharey=not fit_y, squeeze=False)
     axes = axes[0]
 
     palette = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0"])
@@ -172,21 +174,48 @@ def build_figure(panels, title, ylabel):
         ax.margins(x=0.08)
         if panel["title"]:
             ax.set_title(panel["title"])
+        if ylabel and fit_y:
+            ax.set_ylabel(ylabel)
 
-    if ylabel:
+    if ylabel and not fit_y:
         axes[0].set_ylabel(ylabel)
     if title:
         fig.suptitle(title)
 
-    ncol = min(len(handles), 5)
-    legend_rows = 1 + (len(handles) - 1) // ncol
-    bottom = 0.04 + 0.05 * legend_rows
+    # Legend sits at the figure's bottom edge and is kept on one row by
+    # shrinking its text (down to a floor), else wrapped to fit the width. The
+    # figure is saved at exactly its figsize (no bbox_inches="tight"), so the
+    # PDF's size never depends on the legend length.
+    renderer = fig.canvas.get_renderer()
+
+    def make_legend(ncol, fontsize):
+        legend = fig.legend(handles.values(), handles.keys(),
+                            loc="lower center", bbox_to_anchor=(0.5, 0.0),
+                            ncol=ncol, borderaxespad=0.2, fontsize=fontsize,
+                            columnspacing=1.2, handletextpad=0.5,
+                            frameon=True, framealpha=0.9, edgecolor="0.8",
+                            fancybox=False)
+        bbox = legend.get_window_extent(renderer).transformed(
+            fig.transFigure.inverted())
+        return legend, bbox
+
+    full = _FONT_SIZES["legend.fontsize"]
+    for fontsize in range(full, _MIN_LEGEND_FONT - 1, -1):
+        legend, bbox = make_legend(len(handles), fontsize)
+        if bbox.width <= 0.98:
+            break
+        legend.remove()
+    else:
+        ncol = min(len(handles), 5)
+        while True:
+            legend, bbox = make_legend(ncol, full)
+            if ncol == 1 or bbox.width <= 0.98:
+                break
+            legend.remove()
+            ncol -= 1
+    bottom = bbox.y1 + 0.02
 
     fig.tight_layout(rect=(0, bottom, 1, 0.97 if title else 1.0))
-    fig.legend(handles.values(), handles.keys(),
-               loc="upper center", bbox_to_anchor=(0.5, bottom),
-               ncol=ncol,
-               frameon=True, framealpha=0.9, edgecolor="0.8", fancybox=False)
     return fig
 
 
@@ -203,6 +232,12 @@ def main(argv=None):
                    help="open an interactive window instead of saving a file")
     p.add_argument("--title", default="", help="overall figure title")
     p.add_argument("--ytitle", default="", help="shared y-axis title")
+    p.add_argument("--fit-y", dest="fit_y", action="store_true",
+                   help="scale each panel's y-axis to its own bars (default: "
+                        "all panels share one y-range)")
+    p.add_argument("--height", type=float, default=4.3,
+                   help="figure height in inches (default 4.3); lower it to "
+                        "squish the plots vertically")
     p.add_argument("--dpi", type=int, default=150, help="output DPI (default 150)")
     args = p.parse_args(argv)
 
@@ -211,13 +246,14 @@ def main(argv=None):
     except (OSError, ValueError) as e:
         p.error(str(e))
 
-    fig = build_figure(panels, args.title, args.ytitle)
+    fig = build_figure(panels, args.title, args.ytitle, height=args.height,
+                       fit_y=args.fit_y)
 
     if args.show and not args.output:
         plt.show()
     else:
         out = resolve_output(args.output, args.csv)
-        fig.savefig(out, dpi=args.dpi, bbox_inches="tight", pad_inches=0.03)
+        fig.savefig(out, dpi=args.dpi)
         print(f"wrote {out}")
 
 
